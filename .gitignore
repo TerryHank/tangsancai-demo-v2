@@ -10,6 +10,11 @@ ollama_dist/
 ollama_extracted/
 *.log
 
+# Local bridge build and offline package
+/kinect_bridge/bin/
+/kinect_bridge/obj/
+/offline/
+
 # Ignore OS files
 .DS_Store
 Thumbs.db
