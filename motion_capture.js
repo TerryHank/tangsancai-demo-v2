@@ -72,7 +72,10 @@ class MotionCaptureEngine {
     }
 
     processFrame(frame, image) {
-        if (this.isPaused) return;
+        if (this.isPaused) {
+            if (image) this.onFrame(frame, image);
+            return;
+        }
         const now = frame.timestampMs;
         if (frame.bodyId == null) {
             if (image) this.onFrame(frame, image);

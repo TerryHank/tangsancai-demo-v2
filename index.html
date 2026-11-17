@@ -176,6 +176,20 @@
             animation: goldPulse 2s infinite;
         }
 
+        #huxuanPromptBanner {
+            white-space: nowrap;
+            width: max-content;
+            max-width: 96vw;
+            padding-inline: clamp(.6rem, 3vw, 3rem);
+            font-size: clamp(12px, 3.6vw, 24px);
+            letter-spacing: .08em;
+        }
+        #outroBlessingText {
+            white-space: nowrap;
+            font-size: clamp(16px, 5vw, 32px);
+            letter-spacing: .15em;
+            line-height: 1.3;
+        }
     </style>
     
 </head>
@@ -198,6 +212,7 @@
                 <!-- 1. Picture-in-Picture Webcam Feed (Top-Right PIP) -->
                 <div id="webcamPIP" class="absolute top-4 right-4 z-30 w-32 h-40 rounded-2xl overflow-hidden border border-amber-500/30 shadow-[0_8px_32px_rgba(0,0,0,0.5)] bg-neutral-950 flex items-center justify-center">
                     <img id="webcam" alt="" class="w-full h-full object-cover" style="transform: scaleX(-1);">
+                    <canvas id="jointPreview" aria-hidden="true" class="absolute inset-0 w-full h-full pointer-events-none" style="transform:scaleX(-1)"></canvas>
                     <!-- Mini status label -->
                     <div class="absolute bottom-1 left-1.5 px-1.5 py-0.5 bg-black/60 rounded text-[7px] text-amber-500/80 font-classical font-semibold tracking-wider">
                         <span id="sensorStatus">等待 Kinect</span>
@@ -235,10 +250,7 @@
                     <!-- Backdrop blue curtain image (natural size, centered) -->
                     <img class="absolute pointer-events-none" src="assets/images/outro_curtain.jpg" style="max-width: 100%; max-height: 100%; object-fit: contain;" />
                     
-                    <div id="outroBlessingText" class="relative z-10 font-sans text-3xl md:text-5xl font-normal tracking-[0.2em] text-white drop-shadow-[0_2px_12px_rgba(0,0,0,0.85)] text-center leading-[1.8] flex flex-col items-center justify-center space-y-1.5 select-none" style="top: -12px;">
-                        <div>舞 动 千 年</div>
-                        <div>华 彩 乐 章</div>
-                    </div>
+                    <div id="outroBlessingText" class="relative z-10 font-sans text-3xl md:text-5xl font-normal tracking-[0.2em] text-white drop-shadow-[0_2px_12px_rgba(0,0,0,0.85)] text-center leading-[1.8] flex flex-col items-center justify-center space-y-1.5 select-none" style="top: -12px;">舞动千年，华彩乐章</div>
                 </div>
                 
                 <!-- 2c. Standby Silhouette Image Overlay (State: STANDBY_LOOP) -->
@@ -277,7 +289,7 @@
 
 
                 <!-- Floating On-Screen Debug Logger (Inside Stage Overlay) -->
-                <div id="onScreenLogger" class="absolute bottom-20 left-4 z-50 w-96 h-48 bg-black bg-opacity-95 border border-green-500/50 rounded-lg p-2.5 text-[9px] font-mono text-green-400 overflow-y-auto shadow-2xl flex flex-col">
+                <div id="onScreenLogger" class="hidden absolute bottom-20 left-4 z-50 w-96 h-48 bg-black bg-opacity-95 border border-green-500/50 rounded-lg p-2.5 text-[9px] font-mono text-green-400 overflow-y-auto shadow-2xl flex flex-col">
                     <div class="flex justify-between border-b border-white/10 pb-1.5 mb-1.5 shrink-0">
                         <span class="text-white font-semibold flex items-center gap-1">🔍 调试日志 (Debug Logs)</span>
                         <div class="flex gap-2">
@@ -667,6 +679,7 @@
         let colorBody = null;
         let colorWorkerReady = false;
         let colorWorkerBusy = false;
+        let nextColorSampleAt = 0;
         let previewUrl;
         let colorSamples = [];
         const colorWorker = new Worker('clothing_color_worker.js');
@@ -698,10 +711,12 @@
                 
                 console.log(`[Video Loading 🎥] Switching source -> ${src} (loop: ${loop}, blend: ${blendMode})`);
                 
-                // Keep nextPlayer completely transparent while loading in background
-                nextPlayer.style.opacity = '0';
-                nextPlayer.classList.remove('opacity-100');
-                nextPlayer.classList.add('opacity-0');
+                // Keep the initial stage visible while the first video starts.
+                if (prevPlayer) {
+                    nextPlayer.style.opacity = '0';
+                    nextPlayer.classList.remove('opacity-100');
+                    nextPlayer.classList.add('opacity-0');
+                }
                 
                 if (!nextPlayer.src || !nextPlayer.src.includes(src) || nextPlayer.error || nextPlayer.networkState === HTMLMediaElement.NETWORK_NO_SOURCE) {
                     nextPlayer.src = src;
@@ -759,6 +774,7 @@
                     // Only hide previous player AFTER next player has rendered active frames!
                     if (prevPlayer && prevPlayer !== nextPlayer) {
                         setTimeout(() => {
+                            if (activePlayer === prevPlayer) return;
                             prevPlayer.classList.remove('opacity-100');
                             prevPlayer.classList.add('opacity-0');
                             prevPlayer.style.opacity = '0';
@@ -994,12 +1010,6 @@
             };
             
             try {
-                // Delay spin videos preload by 2 seconds so the reveal video starts playing smoothly first
-                setTimeout(() => {
-                    if (currentState === AppState.INTRO_REVEAL) {
-                        preloadSpinVideos(finalFigurine.id);
-                    }
-                }, 2000);
                 if (window.revealBannerTimer) clearTimeout(window.revealBannerTimer);
                 window.revealBannerTimer = setTimeout(() => {
                     if (currentState === AppState.INTRO_REVEAL) {
@@ -1044,20 +1054,7 @@
                 blessingOverlay.style.transition = '';
             }
             if (blessingOverlay && blessingText) {
-                let line1 = randomBlessing;
-                let line2 = "";
-                if (randomBlessing.includes("，")) {
-                    const parts = randomBlessing.split("，");
-                    line1 = parts[0];
-                    line2 = parts[1] || "";
-                } else if (randomBlessing.length >= 8) {
-                    line1 = randomBlessing.substring(0, 4);
-                    line2 = randomBlessing.substring(4);
-                }
-                blessingText.innerHTML = `
-                    <div style="font-family: 'Noto Sans SC', sans-serif; font-size: 24pt; letter-spacing: 0.3em; line-height: 1.2; margin-right: -0.3em;" class="text-white drop-shadow-[0_2px_12px_rgba(0,0,0,0.85)] font-normal">${line1}</div>
-                    ${line2 ? `<div style="font-family: 'Noto Sans SC', sans-serif; font-size: 24pt; letter-spacing: 0.3em; line-height: 1.2; margin-right: -0.3em; margin-top: 7.2pt;" class="text-white drop-shadow-[0_2px_12px_rgba(0,0,0,0.85)] font-normal">${line2}</div>` : ''}
-                `;
+                blessingText.textContent = randomBlessing;
             }
 
             
@@ -1500,32 +1497,62 @@
 
         }
 
-        function preloadSpinVideos(colorId) {
-            const list = [
-                `video/${colorId}_to_big.mp4`,
-                "video/big_flower_to_round.mp4",
-                "video/big_flower_to_round_special.mp4",
-                "video/round_to_blue_flower.mp4",
-                "video/round_to_blue_flower_special.mp4",
-                "video/blue_flower_to_stripe.mp4",
-                "video/blue_flower_to_stripe_special.mp4",
-                `video/stripe_to_${colorId}.mp4`,
-                `video/${colorId}_dance.mp4`,
-                `video/reveal_${colorId}.mp4`,
-                `video/${colorId}_outro.mp4`
-            ];
-            list.forEach(src => {
-                const v = document.createElement('video');
-                v.preload = 'auto';
-                v.src = src;
-                v.muted = true;
-                v.load();
-            });
+        const jointPreview = document.getElementById('jointPreview');
+        const jointPen = jointPreview.getContext('2d');
+        const bones = [
+            ['leftWrist', 'leftElbow'], ['leftElbow', 'leftShoulder'],
+            ['leftShoulder', 'rightShoulder'], ['rightShoulder', 'rightElbow'],
+            ['rightElbow', 'rightWrist'], ['leftShoulder', 'leftHip'],
+            ['leftHip', 'rightHip'], ['rightHip', 'rightShoulder']
+        ];
+        let previewJoints = null;
+
+        function drawPreviewJoints() {
+            const w = Math.round(jointPreview.clientWidth * devicePixelRatio);
+            const h = Math.round(jointPreview.clientHeight * devicePixelRatio);
+            if (jointPreview.width !== w || jointPreview.height !== h) {
+                jointPreview.width = w;
+                jointPreview.height = h;
+            }
+            jointPen.clearRect(0, 0, w, h);
+            if (!previewJoints || !w || !h || !webcamElement.naturalWidth ||
+                webcamElement.currentSrc !== previewUrl) return;
+
+            // Match the preview's centered object-fit: cover crop before both layers are mirrored.
+            const scale = Math.max(w / webcamElement.naturalWidth, h / webcamElement.naturalHeight);
+            const iw = webcamElement.naturalWidth * scale, ih = webcamElement.naturalHeight * scale;
+            const points = {};
+            for (const [name, point] of Object.entries(previewJoints)) {
+                if (point && Number.isFinite(point.x) && Number.isFinite(point.y)) {
+                    points[name] = [(w - iw) / 2 + point.x * iw, (h - ih) / 2 + point.y * ih];
+                }
+            }
+            jointPen.beginPath();
+            for (const [from, to] of bones) {
+                if (!points[from] || !points[to]) continue;
+                jointPen.moveTo(...points[from]);
+                jointPen.lineTo(...points[to]);
+            }
+            jointPen.strokeStyle = '#35ffd2';
+            jointPen.lineWidth = 2 * devicePixelRatio;
+            jointPen.stroke();
+            jointPen.fillStyle = '#ffe55c';
+            jointPen.strokeStyle = '#233035';
+            jointPen.lineWidth = devicePixelRatio;
+            for (const [x, y] of Object.values(points)) {
+                jointPen.beginPath();
+                jointPen.arc(x, y, 3 * devicePixelRatio, 0, Math.PI * 2);
+                jointPen.fill();
+                jointPen.stroke();
+            }
         }
+        webcamElement.addEventListener('load', drawPreviewJoints);
+        new ResizeObserver(drawPreviewJoints).observe(jointPreview);
 
         function receiveColorFrame(frame, image) {
             const previous = previewUrl;
             previewUrl = URL.createObjectURL(image);
+            previewJoints = frame.bodyId == null ? null : frame.colorJoints;
             webcamElement.src = previewUrl;
             if (previous) URL.revokeObjectURL(previous);
 
@@ -1541,6 +1568,8 @@
             const joints = frame.colorJoints;
             const required = ['leftShoulder', 'rightShoulder', 'leftHip', 'rightHip'];
             if (!colorWorkerReady || colorWorkerBusy || !required.every(name => joints[name])) return;
+            if (performance.now() < nextColorSampleAt) return;
+            nextColorSampleAt = performance.now() + 200;
             colorWorkerBusy = true;
             colorWorker.postMessage({ frameId: frame.frameId, round: colorRound, image, joints });
         }
@@ -1589,6 +1618,8 @@
                     if (state !== 'connected' && previewUrl) {
                         webcamElement.removeAttribute('src');
                         URL.revokeObjectURL(previewUrl);
+                        previewJoints = null;
+                        jointPen.clearRect(0, 0, jointPreview.width, jointPreview.height);
                         previewUrl = undefined;
                     }
                 }

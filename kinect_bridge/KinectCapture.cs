@@ -1,7 +1,6 @@
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.Numerics;
-using System.Runtime.InteropServices;
 using Azure = Microsoft.Azure.Kinect.Sensor;
 using Tracking = Microsoft.Azure.Kinect.BodyTracking;
 using V2 = Microsoft.Kinect;
@@ -96,8 +95,11 @@ sealed class V2Capture : ICapture
 {
     private readonly V2.KinectSensor sensor;
     private readonly V2.MultiSourceFrameReader reader;
+    private readonly V2.BodyFrameReader bodyReader;
     private readonly V2.Body[] bodies = new V2.Body[6];
-    private byte[]? bgra;
+    private readonly V2.Body[] colorBodies = new V2.Body[6];
+    private readonly Bitmap preview = new(640, 360, PixelFormat.Format32bppRgb);
+    private readonly MemoryStream jpeg = new();
     public string Name => "v2";
 
     public V2Capture()
@@ -107,6 +109,7 @@ sealed class V2Capture : ICapture
         try
         {
             reader = sensor.OpenMultiSourceFrameReader(V2.FrameSourceTypes.Body | V2.FrameSourceTypes.Color);
+            bodyReader = sensor.BodyFrameSource.OpenReader();
         }
         catch
         {
@@ -117,10 +120,12 @@ sealed class V2Capture : ICapture
 
     public Reading? Read(bool includeColor)
     {
-        var frame = reader.AcquireLatestFrame();
-        using var skeletons = frame?.BodyFrameReference.AcquireFrame();
+        using var skeletons = bodyReader.AcquireLatestFrame();
         if (skeletons is null) return null;
-        using var color = includeColor ? frame!.ColorFrameReference.AcquireFrame() : null;
+        var frame = includeColor ? reader.AcquireLatestFrame() : null;
+        using var color = frame?.ColorFrameReference.AcquireFrame();
+        using var pairedBodies = color is null ? null : frame!.BodyFrameReference.AcquireFrame();
+        pairedBodies?.GetAndRefreshBodyData(colorBodies);
         skeletons.GetAndRefreshBodyData(bodies);
         var tracked = new List<Skeleton>();
         foreach (var body in bodies)
@@ -128,14 +133,20 @@ sealed class V2Capture : ICapture
             if (!body.IsTracked) continue;
             var joints = new Dictionary<string, Joint>();
             var colorJoints = new Dictionary<string, Point>();
+            var paired = pairedBodies is null ? null : Array.Find(colorBodies,
+                candidate => candidate is { IsTracked: true } && candidate.TrackingId == body.TrackingId);
+            var latestJoints = body.Joints;
+            var pairedJoints = paired?.Joints;
             foreach (var (name, id) in JointNames.V2)
             {
-                var joint = body.Joints[id];
+                var joint = latestJoints[id];
                 var pos = joint.Position;
                 // Match the Azure convention: meters, positive Y down and positive Z away.
                 joints[name] = new(-pos.X, -pos.Y, pos.Z, joint.TrackingState == V2.TrackingState.Tracked);
-                if (color is null || !joints[name].Tracked) continue;
-                var pixel = sensor.CoordinateMapper.MapCameraPointToColorSpace(pos);
+                if (color is null || pairedJoints is null) continue;
+                var colorJoint = pairedJoints[id];
+                if (colorJoint.TrackingState != V2.TrackingState.Tracked) continue;
+                var pixel = sensor.CoordinateMapper.MapCameraPointToColorSpace(colorJoint.Position);
                 if (float.IsFinite(pixel.X) && float.IsFinite(pixel.Y))
                     colorJoints[name] = new(pixel.X / color.FrameDescription.Width, pixel.Y / color.FrameDescription.Height);
             }
@@ -146,26 +157,58 @@ sealed class V2Capture : ICapture
         return new(tracked.ToArray(), color is null ? null : EncodeColor(color));
     }
 
-    private byte[] EncodeColor(V2.ColorFrame color)
+    private unsafe byte[] EncodeColor(V2.ColorFrame color)
     {
         var width = color.FrameDescription.Width;
         var height = color.FrameDescription.Height;
-        bgra ??= new byte[width * height * 4];
-        color.CopyConvertedFrameDataToArray(bgra, V2.ColorImageFormat.Bgra);
-        using var bitmap = new Bitmap(width, height, PixelFormat.Format32bppRgb);
-        var data = bitmap.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.WriteOnly, bitmap.PixelFormat);
-        try { Marshal.Copy(bgra, 0, data.Scan0, bgra.Length); }
-        finally { bitmap.UnlockBits(data); }
-        using var scaled = new Bitmap(bitmap, 640, 360);
-        using var jpeg = new MemoryStream();
-        scaled.Save(jpeg, ImageFormat.Jpeg);
+        if (color.RawColorImageFormat == V2.ColorImageFormat.Yuy2)
+        {
+            using var raw = color.LockRawImageBuffer();
+            if (raw.Size < (long)width * height * 2) throw new InvalidDataException("Incomplete Kinect YUY2 frame");
+            var data = preview.LockBits(new Rectangle(0, 0, preview.Width, preview.Height),
+                ImageLockMode.WriteOnly, preview.PixelFormat);
+            try
+            {
+                // YUY2 stores Y0 U Y1 V per pair. Sample at output resolution before conversion.
+                for (int y = 0; y < data.Height; y++)
+                {
+                    var row = (byte*)raw.UnderlyingBuffer + ((y * height / data.Height) * width * 2);
+                    var dst = (byte*)data.Scan0 + y * data.Stride;
+                    for (int x = 0; x < data.Width; x++, dst += 4)
+                    {
+                        int sx = x * width / data.Width;
+                        var pair = row + (sx & ~1) * 2;
+                        int luma = 298 * (pair[(sx & 1) * 2] - 16) + 128;
+                        int u = pair[1] - 128, v = pair[3] - 128;
+                        dst[0] = (byte)Math.Clamp((luma + 516 * u) >> 8, 0, 255);
+                        dst[1] = (byte)Math.Clamp((luma - 100 * u - 208 * v) >> 8, 0, 255);
+                        dst[2] = (byte)Math.Clamp((luma + 409 * v) >> 8, 0, 255);
+                    }
+                }
+            }
+            finally { preview.UnlockBits(data); }
+        }
+        else
+        {
+            using var full = new Bitmap(width, height, PixelFormat.Format32bppRgb);
+            var data = full.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.WriteOnly, full.PixelFormat);
+            try { color.CopyConvertedFrameDataToIntPtr(data.Scan0, (uint)(data.Stride * height), V2.ColorImageFormat.Bgra); }
+            finally { full.UnlockBits(data); }
+            using var graphics = Graphics.FromImage(preview);
+            graphics.DrawImage(full, 0, 0, preview.Width, preview.Height);
+        }
+        jpeg.SetLength(0);
+        preview.Save(jpeg, ImageFormat.Jpeg);
         return jpeg.ToArray();
     }
 
     public void Dispose()
     {
+        bodyReader.Dispose();
         reader.Dispose();
         sensor.Close();
+        preview.Dispose();
+        jpeg.Dispose();
     }
 }
 

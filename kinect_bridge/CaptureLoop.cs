@@ -92,11 +92,13 @@ sealed class CaptureLoop(string mode, string root)
         long lastSeen = 0;
         long lastFrame = clock.ElapsedMilliseconds;
         long lastColor = lastFrame - 200;
+        // Kinect v2 supplies a 640x360 preview. Request it on each sensor frame.
+        int colorInterval = source is V2Capture ? 0 : 200;
         while (!cancellation.IsCancellationRequested)
         {
             if (mode == "mock" && Volatile.Read(ref clients) == 0) return;
             var now = clock.ElapsedMilliseconds;
-            var reading = source.Read(now - lastColor >= 200 && Volatile.Read(ref clients) > 0);
+            var reading = source.Read(now - lastColor >= colorInterval && Volatile.Read(ref clients) > 0);
             if (reading is null)
             {
                 if (clock.ElapsedMilliseconds - lastFrame > 3000)
